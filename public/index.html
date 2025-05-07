@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -9,7 +9,7 @@
         .container { max-width: 600px; margin: 0 auto; background-color: #fff; padding: 25px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1), 0 8px 16px rgba(0,0,0,0.1); }
         h1 { color: #007bff; text-align: center; margin-bottom: 20px; }
         label { display: block; margin-top: 15px; margin-bottom: 5px; font-weight: 600; color: #4b4f56; }
-        input[type="text"], input[type="file"] {
+        input[type="text"], input[type="file"], select {
             width: 100%;
             padding: 10px;
             margin-bottom: 10px;
@@ -19,6 +19,20 @@
             font-size: 16px;
         }
         input[type="file"] { padding: 7px; }
+        .drop-zone {
+            border: 2px dashed #dddfe2;
+            border-radius: 6px;
+            padding: 20px;
+            text-align: center;
+            cursor: pointer;
+            margin-bottom: 10px;
+            background-color: #f9f9f9;
+        }
+        .drop-zone.drag-over {
+            border-color: #007bff;
+            background-color: #e9f5ff;
+        }
+        .drop-zone-text { color: #606770; }
         button {
             display: block;
             width: 100%;
@@ -48,24 +62,32 @@
         <h1>NovelAI Vibe Embedder</h1>
 
         <label for="apiToken">NovelAI API Token (e.g., pst-xxxx):</label>
-        <input type="text" id="apiToken" placeholder="Enter your NovelAI API token">
+        <input type="text" id="apiToken" placeholder="输入您的 NovelAI API 令牌">
 
-        <label for="imageFile">Upload PNG Image:</label>
-        <input type="file" id="imageFile" accept="image/png">
+        <label for="novelaiModel">选择 NovelAI 模型:</label>
+        <select id="novelaiModel">
+            <option value="nai-diffusion-4-full" selected>nai-diffusion-4-full</option>
+            <option value="nai-diffusion-4-curated-preview">nai-diffusion-4-curated-preview</option>
+        </select>
 
-        <button id="processButton">Process Image & Download</button>
+        <label for="imageFile">上传图片 (PNG, JPG, GIF, WebP):</label>
+        <div id="dropZone" class="drop-zone">
+            <input type="file" id="imageFile" accept="image/png, image/jpeg, image/gif, image/webp" style="display: none;">
+            <span class="drop-zone-text">将图片拖拽到此处，或点击选择文件</span>
+        </div>
 
-        <div id="status">Ready. Please provide token and image.</div>
+        <button id="processButton">处理图片并下载</button>
+
+        <div id="status">准备就绪。请输入令牌并选择图片。</div>
         <div id="thumbnailPreviewContainer">
             <img id="thumbnailPreview" src="#" alt="Thumbnail Preview">
         </div>
-        <small>All processing is done in your browser. Your token and image are not sent to any server other than NovelAI's API.</small>
+        <small>所有处理均在您的浏览器中完成。您的令牌和图片不会发送到 NovelAI API 之外的任何服务器。</small>
     </div>
 
     <script>
         // --- Constants ---
         const NOVELAI_API_ENDPOINT = "https://image.novelai.net/ai/encode-vibe";
-        const NOVELAI_MODEL = "nai-diffusion-4-full";
         const METADATA_KEY_NOVELAI_VIBE = "NovelAI_Vibe_Encoding_Base64"; // Keyword for iTXt chunk
         const THUMBNAIL_MAX_WIDTH = 256;
         const THUMBNAIL_MAX_HEIGHT = 256;
@@ -73,10 +95,14 @@
 
         // --- DOM Elements ---
         const apiTokenInput = document.getElementById('apiToken');
+        const novelaiModelSelect = document.getElementById('novelaiModel');
         const imageFileInput = document.getElementById('imageFile');
         const processButton = document.getElementById('processButton');
         const statusDiv = document.getElementById('status');
         const thumbnailPreview = document.getElementById('thumbnailPreview');
+        const dropZone = document.getElementById('dropZone');
+        const dropZoneText = dropZone.querySelector('.drop-zone-text');
+
 
         // --- Text Encoders/Decoders ---
         const textEncoder = new TextEncoder(); // For UTF-8 text in iTXt
@@ -109,7 +135,7 @@
         function extractPngChunks(arrayBuffer) {
             const view = new DataView(arrayBuffer);
             for (let i = 0; i < PNG_SIGNATURE.length; i++) {
-                if (view.getUint8(i) !== PNG_SIGNATURE[i]) throw new Error("Invalid PNG: Signature mismatch.");
+                if (view.getUint8(i) !== PNG_SIGNATURE[i]) throw new Error("无效的 PNG：签名不匹配。");
             }
 
             const chunks = [];
@@ -129,7 +155,7 @@
                 if (type === 'IEND') break;
             }
             if (chunks.length === 0 || chunks[chunks.length -1].name !== 'IEND') {
-                console.warn("PNG parsing might be incomplete or IEND chunk not last/found.");
+                console.warn("PNG 解析可能不完整或未找到 IEND 块。");
             }
             return chunks;
         }
@@ -207,7 +233,7 @@
             return new Promise((resolve, reject) => {
                 const reader = new FileReader();
                 reader.onload = e => resolve(e.target.result);
-                reader.onerror = e => reject(new Error("File reading error: " + e.target.error));
+                reader.onerror = e => reject(new Error("文件读取错误: " + e.target.error));
                 reader.readAsArrayBuffer(file);
             });
         }
@@ -216,7 +242,7 @@
             return new Promise((resolve, reject) => {
                 const reader = new FileReader();
                 reader.onload = e => resolve(e.target.result);
-                reader.onerror = e => reject(new Error("File to DataURL error: " + e.target.error));
+                reader.onerror = e => reject(new Error("文件转 DataURL 错误: " + e.target.error));
                 reader.readAsDataURL(file);
             });
         }
@@ -230,14 +256,24 @@
             return window.btoa(binary);
         }
 
+        function resetFileInputs() {
+            imageFileInput.value = ''; // Clears the selected file from the input
+            thumbnailPreview.src = '#';
+            thumbnailPreview.style.display = 'none';
+            dropZoneText.textContent = '将图片拖拽到此处，或点击选择文件';
+            
+            // setTimeout(() => setStatus('准备就绪。请输入令牌并选择图片。', 'info'), 2000);
+        }
+
+
         // --- Core Application Logic ---
-        async function callNovelAIAPI(token, base64ImageString) {
-            setStatus('Calling NovelAI API...', 'info');
+        async function callNovelAIAPI(token, base64ImageString, modelName) {
+            setStatus('正在调用 NovelAI API...', 'info');
             const payload = {
                 image: base64ImageString.startsWith('data:') ? base64ImageString.split(',')[1] : base64ImageString,
                 information_extracted: 1,
                 mask: null,
-                model: NOVELAI_MODEL,
+                model: modelName,
             };
 
             const response = await fetch(NOVELAI_API_ENDPOINT, {
@@ -245,21 +281,21 @@
                 headers: {
                     'Authorization': `Bearer ${token}`,
                     'Content-Type': 'application/json',
-                    'Referer': 'https://novelai.net', // Good practice if API expects it
+                    'Referer': 'https://novelai.net', // Good practice
                 },
                 body: JSON.stringify(payload),
             });
 
             if (!response.ok) {
                 const errorText = await response.text();
-                throw new Error(`NovelAI API Error (${response.status}): ${errorText}`);
+                throw new Error(`NovelAI API 错误 (${response.status}): ${errorText}`);
             }
-            setStatus('NovelAI API call successful.', 'info');
+            setStatus('NovelAI API 调用成功。', 'info');
             return await response.arrayBuffer();
         }
 
         async function createThumbnail(imageDataURL) {
-            setStatus('Creating thumbnail...', 'info');
+            setStatus('正在创建缩略图...', 'info');
             return new Promise((resolve, reject) => {
                 const img = new Image();
                 img.onload = () => {
@@ -282,17 +318,17 @@
                     const ctx = canvas.getContext('2d');
                     ctx.drawImage(img, 0, 0, width, height);
 
-                    const previewDataUrl = canvas.toDataURL('image/png');
+                    const previewDataUrl = canvas.toDataURL('image/png'); // This will be the preview of the thumbnail
                     canvas.toBlob(async (blob) => {
-                        if (!blob) return reject(new Error("Canvas toBlob failed."));
+                        if (!blob) return reject(new Error("Canvas toBlob 失败。"));
                         try {
-                            const arrayBuffer = await blob.arrayBuffer();
+                            const arrayBuffer = await blob.arrayBuffer(); // This is the PNG thumbnail ArrayBuffer
                             resolve({ arrayBuffer, previewDataUrl });
                         } catch (e) { reject(e); }
-                    }, 'image/png');
+                    }, 'image/png'); // Ensure blob is PNG
                 };
-                img.onerror = () => reject(new Error('Failed to load image for thumbnail.'));
-                img.src = imageDataURL;
+                img.onerror = () => reject(new Error('加载图像以创建缩略图失败。'));
+                img.src = imageDataURL; // Source can be any image format data URL
             });
         }
 
@@ -305,72 +341,136 @@
             a.click();
             document.body.removeChild(a);
             URL.revokeObjectURL(url);
-            setStatus(`Successfully processed! ${filename} downloaded.`, 'success');
+            setStatus(`处理成功！ ${filename} 已下载。`, 'success');
+        }
+
+        async function displayInitialPreview(file) {
+            if (file && file.type.startsWith('image/')) {
+                try {
+                    const dataUrl = await fileToDataURL(file);
+                    thumbnailPreview.src = dataUrl;
+                    thumbnailPreview.style.display = 'block';
+                    dropZoneText.textContent = file.name; // Show filename in drop zone
+                    setStatus('图片已选择。准备处理。', 'info');
+                } catch (e) {
+                    setStatus('预览图片错误: ' + e.message, 'error');
+                    thumbnailPreview.style.display = 'none';
+                    dropZoneText.textContent = '将图片拖拽到此处，或点击选择文件';
+                }
+            } else {
+                thumbnailPreview.style.display = 'none';
+                imageFileInput.value = ''; // Clear if invalid file was somehow selected
+                dropZoneText.textContent = '将图片拖拽到此处，或点击选择文件';
+            }
         }
 
         async function handleImageProcess() {
             const token = apiTokenInput.value.trim();
+            const model = novelaiModelSelect.value;
             const file = imageFileInput.files[0];
 
-            if (!token) return setStatus('API Token is required.', 'error');
-            if (!file) return setStatus('Please select a PNG image file.', 'error');
-            if (file.type !== 'image/png') return setStatus('File must be a PNG image.', 'error');
+            if (!token) return setStatus('API Token 是必需的。', 'error');
+            if (!file) return setStatus('请选择一个图片文件。', 'error');
+            if (!file.type.startsWith('image/')) {
+                 return setStatus('文件必须是有效的图片格式 (PNG, JPG, GIF, WebP)。', 'error');
+            }
 
             processButton.disabled = true;
-            setStatus('Processing...', 'info');
-            thumbnailPreview.style.display = 'none';
+            setStatus('正在处理...', 'info');
 
             try {
-                const originalImageBase64ForAPI = await fileToDataURL(file); // For API and thumbnail source
+                const originalImageBase64DataURL = await fileToDataURL(file);
 
-                // 1. Call NovelAI API
-                const vibeDataArrayBuffer = await callNovelAIAPI(token, originalImageBase64ForAPI);
+                const vibeDataArrayBuffer = await callNovelAIAPI(token, originalImageBase64DataURL, model);
                 if (!vibeDataArrayBuffer || vibeDataArrayBuffer.byteLength === 0) {
-                    throw new Error("Received empty/invalid vibe data from API.");
+                    throw new Error("从 API 收到的 vibe 数据为空或无效。");
                 }
-                setStatus(`Vibe data received (${vibeDataArrayBuffer.byteLength} bytes). Creating thumbnail...`, 'info');
+                setStatus(`收到 Vibe 数据 (${vibeDataArrayBuffer.byteLength} 字节)。正在创建缩略图...`, 'info');
 
-                // 2. Create Thumbnail and get its ArrayBuffer (for modification) and DataURL (for preview)
-                const { arrayBuffer: thumbnailArrayBuffer, previewDataUrl: thumbnailPreviewDataUrl } = await createThumbnail(originalImageBase64ForAPI);
+                const { arrayBuffer: thumbnailPngArrayBuffer, previewDataUrl: thumbnailPreviewDataUrl } = await createThumbnail(originalImageBase64DataURL);
                 thumbnailPreview.src = thumbnailPreviewDataUrl;
                 thumbnailPreview.style.display = 'block';
-                setStatus('Thumbnail created. Embedding vibe data...', 'info');
+                setStatus('缩略图已创建。正在嵌入 vibe 数据...', 'info');
 
-                // 3. Prepare Vibe Data for Metadata (Base64 encode it)
                 const base64VibeDataForMetadata = arrayBufferToBase64(vibeDataArrayBuffer);
 
-                // 4. Embed Vibe Data into Thumbnail PNG's Chunks
-                const existingChunks = extractPngChunks(thumbnailArrayBuffer);
+                const existingChunks = extractPngChunks(thumbnailPngArrayBuffer);
                 const iTXtDataBytes = createITXtChunkData(METADATA_KEY_NOVELAI_VIBE, base64VibeDataForMetadata);
                 const newITXtChunk = { name: 'iTXt', data: iTXtDataBytes };
 
                 const iendIndex = existingChunks.findIndex(chunk => chunk.name === 'IEND');
                 if (iendIndex !== -1) {
-                    existingChunks.splice(iendIndex, 0, newITXtChunk); // Insert before IEND
+                    existingChunks.splice(iendIndex, 0, newITXtChunk);
                 } else {
-                    console.warn("No IEND chunk found in thumbnail. Appending iTXt. This might be an issue.");
-                    existingChunks.push(newITXtChunk); // Fallback, less ideal
+                    console.warn("在缩略图中未找到 IEND 块。正在追加 iTXt。这可能是一个问题。");
+                    existingChunks.push(newITXtChunk);
                 }
 
                 const finalPngUint8Array = encodePngChunks(existingChunks);
-                setStatus('Vibe data embedded. Preparing download...', 'info');
+                setStatus('Vibe 数据已嵌入。正在准备下载...', 'info');
 
-                // 5. Trigger Download
                 const blob = new Blob([finalPngUint8Array], { type: 'image/png' });
                 const originalFileNameNoExt = file.name.substring(0, file.name.lastIndexOf('.')) || file.name;
                 const downloadFileName = `${originalFileNameNoExt}_thumb_with_vibe.png`;
                 triggerDownload(blob, downloadFileName);
 
+                // Clear inputs after successful download
+                resetFileInputs();
+                setTimeout(() => {
+                    // Check if user hasn't selected a new file in the meantime
+                    if (!imageFileInput.files || imageFileInput.files.length === 0) {
+                         setStatus('准备就绪。请输入令牌并选择图片。', 'info');
+                    }
+                }, 3000); // Reset status to ready after 3 seconds
+
             } catch (error) {
-                console.error("Processing Error:", error);
-                setStatus(`Error: ${error.message}`, 'error');
+                console.error("处理错误:", error);
+                setStatus(`错误: ${error.message}`, 'error');
+                // Do not clear file input on error, so user can retry or see what was selected
             } finally {
                 processButton.disabled = false;
             }
         }
 
-        // --- Event Listener ---
+        // --- Event Listeners ---
         processButton.addEventListener('click', handleImageProcess);
+
+        dropZone.addEventListener('click', () => imageFileInput.click());
+        imageFileInput.addEventListener('change', (event) => {
+            const file = event.target.files[0];
+            if (file) {
+                displayInitialPreview(file);
+            } else { // If user cancels file selection dialog
+                resetFileInputs();
+                setStatus('已取消文件选择。准备就绪。', 'info');
+            }
+        });
+
+        dropZone.addEventListener('dragover', (event) => {
+            event.preventDefault();
+            dropZone.classList.add('drag-over');
+        });
+
+        dropZone.addEventListener('dragleave', () => {
+            dropZone.classList.remove('drag-over');
+        });
+
+        dropZone.addEventListener('drop', (event) => {
+            event.preventDefault();
+            dropZone.classList.remove('drag-over');
+            const files = event.dataTransfer.files;
+            if (files.length > 0) {
+                // Check if dropped item is a file and is an image
+                if (files[0].type.startsWith('image/')) {
+                    imageFileInput.files = files; // Assign to file input
+                    displayInitialPreview(files[0]); // Show preview
+                } else {
+                    setStatus('拖拽的文件不是有效的图片格式。', 'error');
+                    resetFileInputs(); // Reset if invalid file type dropped
+                }
+            }
+        });
+
     </script>
 </body>
 </html>
