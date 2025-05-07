@@ -1,0 +1,376 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NovelAI Vibe Embedder (Client-Side)</title>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; margin: 20px; background-color: #f0f2f5; color: #1c1e21; line-height: 1.6; }
+        .container { max-width: 600px; margin: 0 auto; background-color: #fff; padding: 25px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1), 0 8px 16px rgba(0,0,0,0.1); }
+        h1 { color: #007bff; text-align: center; margin-bottom: 20px; }
+        label { display: block; margin-top: 15px; margin-bottom: 5px; font-weight: 600; color: #4b4f56; }
+        input[type="text"], input[type="file"] {
+            width: 100%;
+            padding: 10px;
+            margin-bottom: 10px;
+            border-radius: 6px;
+            border: 1px solid #dddfe2;
+            box-sizing: border-box;
+            font-size: 16px;
+        }
+        input[type="file"] { padding: 7px; }
+        button {
+            display: block;
+            width: 100%;
+            padding: 12px;
+            background-color: #007bff;
+            color: white;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 16px;
+            font-weight: 600;
+            transition: background-color 0.2s ease;
+        }
+        button:hover { background-color: #0069d9; }
+        button:disabled { background-color: #bcc0c4; cursor: not-allowed; }
+        #status { margin-top: 20px; padding: 12px; border-radius: 6px; text-align: center; font-weight: 500;}
+        .status-success { background-color: #d4edda; border: 1px solid #c3e6cb; color: #155724; }
+        .status-error { background-color: #f8d7da; border: 1px solid #f5c6cb; color: #721c24; }
+        .status-info { background-color: #d1ecf1; border: 1px solid #bee5eb; color: #0c5460; }
+        #thumbnailPreviewContainer { text-align: center; margin-top: 20px; }
+        #thumbnailPreview { max-width: 200px; max-height: 200px; border: 1px solid #dddfe2; border-radius: 4px; display:none; margin: 0 auto; }
+        small { display: block; text-align: center; margin-top: 15px; color: #606770; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>NovelAI Vibe Embedder</h1>
+
+        <label for="apiToken">NovelAI API Token (e.g., pst-xxxx):</label>
+        <input type="text" id="apiToken" placeholder="Enter your NovelAI API token">
+
+        <label for="imageFile">Upload PNG Image:</label>
+        <input type="file" id="imageFile" accept="image/png">
+
+        <button id="processButton">Process Image & Download</button>
+
+        <div id="status">Ready. Please provide token and image.</div>
+        <div id="thumbnailPreviewContainer">
+            <img id="thumbnailPreview" src="#" alt="Thumbnail Preview">
+        </div>
+        <small>All processing is done in your browser. Your token and image are not sent to any server other than NovelAI's API.</small>
+    </div>
+
+    <script>
+        // --- Constants ---
+        const NOVELAI_API_ENDPOINT = "https://image.novelai.net/ai/encode-vibe";
+        const NOVELAI_MODEL = "nai-diffusion-4-full";
+        const METADATA_KEY_NOVELAI_VIBE = "NovelAI_Vibe_Encoding_Base64"; // Keyword for iTXt chunk
+        const THUMBNAIL_MAX_WIDTH = 256;
+        const THUMBNAIL_MAX_HEIGHT = 256;
+        const PNG_SIGNATURE = new Uint8Array([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]);
+
+        // --- DOM Elements ---
+        const apiTokenInput = document.getElementById('apiToken');
+        const imageFileInput = document.getElementById('imageFile');
+        const processButton = document.getElementById('processButton');
+        const statusDiv = document.getElementById('status');
+        const thumbnailPreview = document.getElementById('thumbnailPreview');
+
+        // --- Text Encoders/Decoders ---
+        const textEncoder = new TextEncoder(); // For UTF-8 text in iTXt
+        const latin1Decoder = new TextDecoder('latin1'); // For PNG chunk type names
+
+        // --- CRC32 Implementation ---
+        let crc32Table = null;
+        function makeCrc32Table() {
+            if (crc32Table) return;
+            crc32Table = new Uint32Array(256);
+            for (let n = 0; n < 256; n++) {
+                let c = n;
+                for (let k = 0; k < 8; k++) {
+                    c = ((c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1));
+                }
+                crc32Table[n] = c;
+            }
+        }
+        makeCrc32Table(); // Initialize on load
+
+        function crc32(bytes, start = 0, length = bytes.length - start) {
+            let crc = 0xFFFFFFFF;
+            for (let i = start; i < start + length; i++) {
+                crc = crc32Table[(crc ^ bytes[i]) & 0xFF] ^ (crc >>> 8);
+            }
+            return crc ^ 0xFFFFFFFF;
+        }
+
+        // --- PNG Chunk Utilities ---
+        function extractPngChunks(arrayBuffer) {
+            const view = new DataView(arrayBuffer);
+            for (let i = 0; i < PNG_SIGNATURE.length; i++) {
+                if (view.getUint8(i) !== PNG_SIGNATURE[i]) throw new Error("Invalid PNG: Signature mismatch.");
+            }
+
+            const chunks = [];
+            let offset = PNG_SIGNATURE.length;
+            while (offset < arrayBuffer.byteLength) {
+                const length = view.getUint32(offset);
+                offset += 4;
+                const typeBytes = new Uint8Array(arrayBuffer, offset, 4);
+                const type = latin1Decoder.decode(typeBytes);
+                offset += 4;
+                const data = new Uint8Array(arrayBuffer, offset, length);
+                offset += length;
+                const crcFromFile = view.getUint32(offset); // CRC from file
+                offset += 4;
+
+                chunks.push({ name: type, data: data });
+                if (type === 'IEND') break;
+            }
+            if (chunks.length === 0 || chunks[chunks.length -1].name !== 'IEND') {
+                console.warn("PNG parsing might be incomplete or IEND chunk not last/found.");
+            }
+            return chunks;
+        }
+
+        function encodePngChunks(chunks) {
+            const chunkBuffers = [];
+            let totalLength = PNG_SIGNATURE.length;
+
+            for (const chunk of chunks) {
+                const typeBytes = textEncoder.encode(chunk.name); // ASCII names, UTF-8 encoder is fine
+                const dataBytes = chunk.data;
+                const length = dataBytes.length;
+
+                const chunkBuffer = new Uint8Array(4 + 4 + length + 4); // Length + Type + Data + CRC
+                const view = new DataView(chunkBuffer.buffer);
+
+                view.setUint32(0, length); // Write chunk data length
+                chunkBuffer.set(typeBytes, 4);    // Write chunk type
+                chunkBuffer.set(dataBytes, 8);    // Write chunk data
+
+                const crcInput = new Uint8Array(4 + length); // Data for CRC is Type + Data
+                crcInput.set(typeBytes, 0);
+                crcInput.set(dataBytes, 4);
+                const calculatedCrc = crc32(crcInput);
+                view.setUint32(8 + length, calculatedCrc); // Write CRC
+
+                chunkBuffers.push(chunkBuffer);
+                totalLength += chunkBuffer.length;
+            }
+
+            const finalPng = new Uint8Array(totalLength);
+            finalPng.set(PNG_SIGNATURE, 0);
+            let currentOffset = PNG_SIGNATURE.length;
+            for (const buffer of chunkBuffers) {
+                finalPng.set(buffer, currentOffset);
+                currentOffset += buffer.length;
+            }
+            return finalPng;
+        }
+
+        function createITXtChunkData(keyword, textDataStr) {
+            const keywordBytes = textEncoder.encode(keyword); // Keyword (Latin-1 compatible)
+            const textBytes = textEncoder.encode(textDataStr);  // Actual text data (UTF-8)
+
+            const buffer = new Uint8Array(
+                keywordBytes.length + 1 + // Keyword + Null
+                1 +                       // Compression flag (0 for uncompressed)
+                1 +                       // Compression method (0)
+                1 +                       // Language tag (null for empty)
+                1 +                       // Translated keyword (null for empty)
+                textBytes.length
+            );
+
+            let offset = 0;
+            buffer.set(keywordBytes, offset); offset += keywordBytes.length;
+            buffer[offset++] = 0; // Null terminate keyword
+
+            buffer[offset++] = 0; // Compression flag: 0 (uncompressed)
+            buffer[offset++] = 0; // Compression method: 0 (no compression)
+
+            buffer[offset++] = 0; // Null terminate empty language tag
+            buffer[offset++] = 0; // Null terminate empty translated keyword
+
+            buffer.set(textBytes, offset);
+            return buffer;
+        }
+
+        // --- UI & File Helpers ---
+        function setStatus(message, type = 'info') { // types: info, success, error
+            statusDiv.textContent = message;
+            statusDiv.className = `status-${type}`;
+        }
+
+        async function fileToArrayBuffer(file) {
+            return new Promise((resolve, reject) => {
+                const reader = new FileReader();
+                reader.onload = e => resolve(e.target.result);
+                reader.onerror = e => reject(new Error("File reading error: " + e.target.error));
+                reader.readAsArrayBuffer(file);
+            });
+        }
+
+        async function fileToDataURL(file) {
+            return new Promise((resolve, reject) => {
+                const reader = new FileReader();
+                reader.onload = e => resolve(e.target.result);
+                reader.onerror = e => reject(new Error("File to DataURL error: " + e.target.error));
+                reader.readAsDataURL(file);
+            });
+        }
+
+        function arrayBufferToBase64(buffer) {
+            let binary = '';
+            const bytes = new Uint8Array(buffer);
+            for (let i = 0; i < bytes.byteLength; i++) {
+                binary += String.fromCharCode(bytes[i]);
+            }
+            return window.btoa(binary);
+        }
+
+        // --- Core Application Logic ---
+        async function callNovelAIAPI(token, base64ImageString) {
+            setStatus('Calling NovelAI API...', 'info');
+            const payload = {
+                image: base64ImageString.startsWith('data:') ? base64ImageString.split(',')[1] : base64ImageString,
+                information_extracted: 1,
+                mask: null,
+                model: NOVELAI_MODEL,
+            };
+
+            const response = await fetch(NOVELAI_API_ENDPOINT, {
+                method: 'POST',
+                headers: {
+                    'Authorization': `Bearer ${token}`,
+                    'Content-Type': 'application/json',
+                    'Referer': 'https://novelai.net', // Good practice if API expects it
+                },
+                body: JSON.stringify(payload),
+            });
+
+            if (!response.ok) {
+                const errorText = await response.text();
+                throw new Error(`NovelAI API Error (${response.status}): ${errorText}`);
+            }
+            setStatus('NovelAI API call successful.', 'info');
+            return await response.arrayBuffer();
+        }
+
+        async function createThumbnail(imageDataURL) {
+            setStatus('Creating thumbnail...', 'info');
+            return new Promise((resolve, reject) => {
+                const img = new Image();
+                img.onload = () => {
+                    const canvas = document.createElement('canvas');
+                    let { width, height } = img;
+
+                    if (width > height) {
+                        if (width > THUMBNAIL_MAX_WIDTH) {
+                            height = Math.round(height * (THUMBNAIL_MAX_WIDTH / width));
+                            width = THUMBNAIL_MAX_WIDTH;
+                        }
+                    } else {
+                        if (height > THUMBNAIL_MAX_HEIGHT) {
+                            width = Math.round(width * (THUMBNAIL_MAX_HEIGHT / height));
+                            height = THUMBNAIL_MAX_HEIGHT;
+                        }
+                    }
+                    canvas.width = width;
+                    canvas.height = height;
+                    const ctx = canvas.getContext('2d');
+                    ctx.drawImage(img, 0, 0, width, height);
+
+                    const previewDataUrl = canvas.toDataURL('image/png');
+                    canvas.toBlob(async (blob) => {
+                        if (!blob) return reject(new Error("Canvas toBlob failed."));
+                        try {
+                            const arrayBuffer = await blob.arrayBuffer();
+                            resolve({ arrayBuffer, previewDataUrl });
+                        } catch (e) { reject(e); }
+                    }, 'image/png');
+                };
+                img.onerror = () => reject(new Error('Failed to load image for thumbnail.'));
+                img.src = imageDataURL;
+            });
+        }
+
+        function triggerDownload(blob, filename) {
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = filename;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+            setStatus(`Successfully processed! ${filename} downloaded.`, 'success');
+        }
+
+        async function handleImageProcess() {
+            const token = apiTokenInput.value.trim();
+            const file = imageFileInput.files[0];
+
+            if (!token) return setStatus('API Token is required.', 'error');
+            if (!file) return setStatus('Please select a PNG image file.', 'error');
+            if (file.type !== 'image/png') return setStatus('File must be a PNG image.', 'error');
+
+            processButton.disabled = true;
+            setStatus('Processing...', 'info');
+            thumbnailPreview.style.display = 'none';
+
+            try {
+                const originalImageBase64ForAPI = await fileToDataURL(file); // For API and thumbnail source
+
+                // 1. Call NovelAI API
+                const vibeDataArrayBuffer = await callNovelAIAPI(token, originalImageBase64ForAPI);
+                if (!vibeDataArrayBuffer || vibeDataArrayBuffer.byteLength === 0) {
+                    throw new Error("Received empty/invalid vibe data from API.");
+                }
+                setStatus(`Vibe data received (${vibeDataArrayBuffer.byteLength} bytes). Creating thumbnail...`, 'info');
+
+                // 2. Create Thumbnail and get its ArrayBuffer (for modification) and DataURL (for preview)
+                const { arrayBuffer: thumbnailArrayBuffer, previewDataUrl: thumbnailPreviewDataUrl } = await createThumbnail(originalImageBase64ForAPI);
+                thumbnailPreview.src = thumbnailPreviewDataUrl;
+                thumbnailPreview.style.display = 'block';
+                setStatus('Thumbnail created. Embedding vibe data...', 'info');
+
+                // 3. Prepare Vibe Data for Metadata (Base64 encode it)
+                const base64VibeDataForMetadata = arrayBufferToBase64(vibeDataArrayBuffer);
+
+                // 4. Embed Vibe Data into Thumbnail PNG's Chunks
+                const existingChunks = extractPngChunks(thumbnailArrayBuffer);
+                const iTXtDataBytes = createITXtChunkData(METADATA_KEY_NOVELAI_VIBE, base64VibeDataForMetadata);
+                const newITXtChunk = { name: 'iTXt', data: iTXtDataBytes };
+
+                const iendIndex = existingChunks.findIndex(chunk => chunk.name === 'IEND');
+                if (iendIndex !== -1) {
+                    existingChunks.splice(iendIndex, 0, newITXtChunk); // Insert before IEND
+                } else {
+                    console.warn("No IEND chunk found in thumbnail. Appending iTXt. This might be an issue.");
+                    existingChunks.push(newITXtChunk); // Fallback, less ideal
+                }
+
+                const finalPngUint8Array = encodePngChunks(existingChunks);
+                setStatus('Vibe data embedded. Preparing download...', 'info');
+
+                // 5. Trigger Download
+                const blob = new Blob([finalPngUint8Array], { type: 'image/png' });
+                const originalFileNameNoExt = file.name.substring(0, file.name.lastIndexOf('.')) || file.name;
+                const downloadFileName = `${originalFileNameNoExt}_thumb_with_vibe.png`;
+                triggerDownload(blob, downloadFileName);
+
+            } catch (error) {
+                console.error("Processing Error:", error);
+                setStatus(`Error: ${error.message}`, 'error');
+            } finally {
+                processButton.disabled = false;
+            }
+        }
+
+        // --- Event Listener ---
+        processButton.addEventListener('click', handleImageProcess);
+    </script>
+</body>
+</html>
